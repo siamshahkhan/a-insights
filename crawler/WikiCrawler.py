@@ -13,7 +13,6 @@ import requests
 from bs4 import BeautifulSoup
 
 
-
 LOGGER_NAME = "wiki_crawler"
 
 
@@ -40,7 +39,7 @@ class WikiCrawler:
 
     def crawl(self, url):
         """
-        Main crawling function, get the title, summary, and image URLs of the Wikipedia page.
+        Main crawling function, get the title, summary (first paragraph), and the main image URL of the Wikipedia page.
 
         :param url: The URL of the Wikipedia page to crawl
         :return: A dictionary with title, summary, and images or None if an error occurs
@@ -62,16 +61,42 @@ class WikiCrawler:
             self._logger.warning(f"Title not found for {url}")
             main_title = "Unknown Title"
 
-        # Get summary (first paragraph in mw-parser-output)
-        summary = soup.select_one("div.mw-parser-output > p").get_text(strip=True)
+        # Get summary (the first paragraph)
+        mw_parser_output = soup.select_one("div.mw-parser-output")
+        stop_div = mw_parser_output.find("div", class_="mw-heading mw-heading2") if mw_parser_output else None
 
-        # Get images
-        images = []
-        for img in soup.find_all("img", src=True):
-            img_url = img["src"]
+        paragraphs_before = []
+        if mw_parser_output and stop_div:
+            # Iterate through elements until we reach stop_div
+            for element in mw_parser_output.children:
+                if element == stop_div:
+                    break
+                if element.name == 'p':
+                    text = element.get_text(strip=True)
+                    if text:
+                        paragraphs_before.append(text)
+        else:
+            # If no stop_div is found, fall back to grabbing all paragraphs
+            paragraphs = soup.select("div.mw-parser-output > p")
+            paragraphs_before = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
+
+        summary_text = "\n".join(paragraphs_before)
+
+       
+        # Get the main image from the infobox if present
+        main_image_url = None
+        infobox = soup.find('table', class_='infobox')
+        if infobox:
+            img = infobox.find('img')
+            if img and img.get('src'):
+                main_image_url = img['src']
+                if main_image_url.startswith('//'):
+                    main_image_url = 'https:' + main_image_url
+
+        images = [main_image_url] if main_image_url else []
 
         self._logger.info(f"Crawled data from {url}")
-        return {"title": main_title, "summary": summary, "images": images}
+        return {"title": main_title, "summary": summary_text, "images": images}
 
     def save(self, article):
         """
@@ -93,15 +118,16 @@ class WikiCrawler:
 
         try:
             conn = mariadb.connect(
-                user= db_user,
-                password= db_password,
-                host= db_host,
+                user=db_user,
+                password=db_password,
+                host=db_host,
                 port=3306,
-                database= db_name
+                database=db_name
             )
             cursor = conn.cursor()
 
             # Insert the article data
+            # Join images with a newline if there are multiple, but here we generally expect only one main image.
             cursor.execute("""
                 INSERT INTO wiki_articles (title, summary, image_url)
                 VALUES (?, ?, ?)
